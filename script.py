@@ -99,19 +99,20 @@ class OpenAPIConvert:
             'properties': properties
         }
     
-    def get_responses(self, soup: BeautifulSoup, url: str, method: str):
+    def get_responses(self, soup: BeautifulSoup, base_schema_name: str):
         response_data = {}
-
         response_tag = soup.find('h3', string='Responses')
+        if response_tag is None:
+            return None
+
         for h4 in response_tag.find_next_siblings('h4'):
             status_code = h4.get_text()
-            schema_name = f"{method}{url.replace('/', ' ')}".title().replace(' ', '')
             if status_code[0] == '2':
                 description = f'Success {status_code}'
-                schema_name += f'Success{status_code}'
+                schema_name = f'{base_schema_name}Success{status_code}'
             else:
                 description = f'Error {status_code}'
-                schema_name += f'Error{status_code}'
+                schema_name = f'{base_schema_name}Error{status_code}'
 
             response_data[status_code] = {
                 'description': description,
@@ -127,16 +128,48 @@ class OpenAPIConvert:
             self.set_schema(schema_name, h4.find_next_sibling('table'))
 
         return response_data
+
+    def get_request_body(self, soup: BeautifulSoup, base_schema_name: str):
+        schema_name = f'{base_schema_name}Input'
+        request_body = {
+            'content': {
+                'application/json': {
+                    'schema': {
+                        '$ref': f'#/components/schemas/{schema_name}'
+                    }
+                }
+            },
+            'required': True
+        }
+
+        h4 = soup.find('h4', string='Body')
+        if h4 is None:
+            return None
+
+        self.set_schema(schema_name, h4.find_next_sibling('table'))
+        
+        return request_body
         
     def set_path_data(self, soup: BeautifulSoup):
         method, url = soup.find('h1').get_text().split(' ')
         method = method.lower()
 
         path_data = {
-            'description': soup.find('h2').get_text().replace('description: ', ''),
-            'parameters': self.get_parameters(soup),
-            'responses': self.get_responses(soup, url, method)
+            'description': soup.find('h2').get_text().replace('description: ', '')
         }
+        base_schema_name = f"{method}{url.replace('/', ' ')}".title().replace(' ', '')
+
+        parameters = self.get_parameters(soup)
+        if parameters:
+            path_data['parameters'] = parameters
+
+        responses = self.get_responses(soup, base_schema_name)
+        if responses:
+            path_data['responses'] = responses
+
+        request_body = self.get_request_body(soup, base_schema_name)
+        if request_body:
+            path_data['requestBody'] = request_body
 
         if url in self.openapi_data['paths']:
             self.openapi_data['paths'][url][method] = path_data
@@ -145,7 +178,7 @@ class OpenAPIConvert:
                 method: path_data
             }
 
-    def to_openapi(self):
+    def convert(self):
         for soup in self.soups:
             try:
                 self.set_path_data(soup)
@@ -170,7 +203,7 @@ class OpenAPIConvert:
 
 async def main():
     converter = OpenAPIConvert.read_markdown()
-    converter.to_openapi()
+    converter.convert()
     
 
 asyncio.run(main())
