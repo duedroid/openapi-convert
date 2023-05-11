@@ -5,7 +5,7 @@ import yaml
 from typing import List
 
 import markdown
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 
 DIRECTORY_NAME = 'api'
@@ -37,11 +37,10 @@ class OpenAPIConvert:
                 'version': '0.1.0'
             },
             'paths': {},
-            'conponents': {}
+            'components': {
+                'schemas': {}
+            }
         }
-
-    def get_response_data(self, nodes: list):
-        return
     
     def get_parameter_data(self, parameter: tuple, soup: BeautifulSoup):
         parameter_data = []
@@ -79,40 +78,65 @@ class OpenAPIConvert:
 
         return parameters
     
-    def get_responses(self, soup: BeautifulSoup):
+    def set_schema(self, schema_name: str, table: Tag):
+        required = []
+        properties = {}
+        tbody = table.find('tbody')
+        for tr in tbody.find_all('tr'):
+            row = [td.text for td in tr.find_all('td')]
+            if row[2] == 'Yes':
+                required.append(row[0])
+
+            properties[row[0]] = {
+                'title': row[0],
+                'type': TYPE_MAPPING[row[1].lower()]
+            }
+
+        self.openapi_data['components']['schemas'][schema_name] = {
+            'title': schema_name,
+            'type': 'object',
+            'required': required,
+            'properties': properties
+        }
+    
+    def get_responses(self, soup: BeautifulSoup, url: str, method: str):
         response_data = {}
 
         response_tag = soup.find('h3', string='Responses')
         for h4 in response_tag.find_next_siblings('h4'):
             status_code = h4.get_text()
+            schema_name = f"{method}{url.replace('/', ' ')}".title().replace(' ', '')
             if status_code[0] == '2':
                 description = f'Success {status_code}'
+                schema_name += f'Success{status_code}'
             else:
                 description = f'Error {status_code}'
+                schema_name += f'Error{status_code}'
 
             response_data[status_code] = {
                 'description': description,
                 'content': {
                     'application/json': {
                         'schema': {
-                            '$ref': "#/components/schemas/HTTPValidationError"
+                            '$ref': f'#/components/schemas/{schema_name}'
                         }
                     }
                 }
             }
 
+            self.set_schema(schema_name, h4.find_next_sibling('table'))
+
         return response_data
         
-    
     def set_path_data(self, soup: BeautifulSoup):
+        method, url = soup.find('h1').get_text().split(' ')
+        method = method.lower()
+
         path_data = {
             'description': soup.find('h2').get_text().replace('description: ', ''),
             'parameters': self.get_parameters(soup),
-            'responses': self.get_responses(soup)
+            'responses': self.get_responses(soup, url, method)
         }
-
-        method, url = soup.find('h1').get_text().split(' ')
-        method = method.lower()
 
         if url in self.openapi_data['paths']:
             self.openapi_data['paths'][url][method] = path_data
@@ -142,6 +166,7 @@ class OpenAPIConvert:
             obj.soups.append(BeautifulSoup(html_string, 'html.parser'))
 
         return obj
+
 
 async def main():
     converter = OpenAPIConvert.read_markdown()
