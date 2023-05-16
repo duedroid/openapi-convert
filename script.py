@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import traceback
 import yaml
 from typing import List
 
@@ -13,6 +14,9 @@ DIRECTORY_NAME = 'api'
 TYPE_MAPPING = {
     'string': 'string',
     'integer': 'integer',
+    'float': 'float',
+    'boolean': 'boolean',
+    'object': 'object'
 }
 
 
@@ -30,7 +34,7 @@ def write_yaml_file(data: dict):
 class OpenAPIConvert:
     def __init__(self):
         self.soups: List[BeautifulSoup] = []
-        self.openapi_data = {
+        self.openapi_schema = {
             'openapi': '3.1.0',
             'info': {
                 'title': 'Tockto API',
@@ -42,30 +46,30 @@ class OpenAPIConvert:
             }
         }
     
-    def get_parameter_data(self, parameter: tuple, soup: BeautifulSoup):
-        parameter_data = []
-
-        h4 = soup.find('h4', string=parameter[0])
-        if h4 is None:
-            return parameter_data
-
-        table = h4.find_next_sibling()
-        tbody = table.find('tbody')
-        for tr in tbody.find_all('tr'):
-            row = [td.text for td in tr.find_all('td')]
-            parameter_data.append({
-                'required': True if row[2] == 'Yes'else False,
-                'schema': {
-                    'type': TYPE_MAPPING[row[1].lower()],
-                },
-                'name': row[0],
-                'in': parameter[1],
-                'description': row[3],
-            })
-
-        return parameter_data
-    
     def get_parameters(self, soup: BeautifulSoup):
+        def get_data(parameter: tuple, soup: BeautifulSoup):
+            parameter_data = []
+
+            h4 = soup.find('h4', string=parameter[0])
+            if h4 is None:
+                return parameter_data
+
+            table = h4.find_next_sibling()
+            tbody = table.find('tbody')
+            for tr in tbody.find_all('tr'):
+                row = [td.text for td in tr.find_all('td')]
+                parameter_data.append({
+                    'required': False,
+                    'schema': {
+                        'type': TYPE_MAPPING[row[1].lower()],
+                    },
+                    'name': row[0],
+                    'in': parameter[1],
+                    'description': row[1],
+                })
+
+            return parameter_data
+        
         parameter_set = [
             ('Headers', 'header'),
             ('Query', 'query'),
@@ -73,47 +77,105 @@ class OpenAPIConvert:
         ]
         parameters = []
         for parameter in parameter_set:
-            parameter_data = self.get_parameter_data(parameter, soup)
+            parameter_data = get_data(parameter, soup)
             parameters.extend(parameter_data)
 
         return parameters
     
-    def set_schema(self, schema_name: str, table: Tag):
-        required = []
-        properties = {}
+    def set_schema(self, base_schema_name: str, table: Tag):
+        self.openapi_schema['components']['schemas'][base_schema_name] = {
+            "type": "object",
+            "required": [],
+            "properties": {}
+        }
+
+        schemas = self.openapi_schema['components']['schemas']
+
+        def get_field_name(field_name: str):
+            return field_name.replace('[]', '').replace('?', '')
+    
+        def get_field_schema(
+            part: str,
+            field_type: str,
+            is_leaf: bool,
+            schema_name: str = None
+        ):
+            if '[]' in part:
+                if is_leaf:
+                    schema = {
+                        'type': 'array',
+                        'items': {
+                            'type': field_type
+                        }
+                    }
+                else:
+                    schema = {
+                        'type': 'array',
+                        'items': {
+                            '$ref': f"#/compononents/schemas/{schema_name}"
+                        }
+                    }
+            else:
+                if is_leaf:
+                    schema = {
+                        'type': field_type
+                    }
+                else:
+                    schema = {
+                        '$ref': f"#/compononents/schemas/{schema_name}"
+                    }
+            
+            return schema
+
+
         tbody = table.find('tbody')
         for tr in tbody.find_all('tr'):
-            row = [td.text for td in tr.find_all('td')]
-            if row[2] == 'Yes':
-                required.append(row[0])
+            row = [td.text.strip() for td in tr.find_all('td')]
 
-            properties[row[0]] = {
-                'title': row[0],
-                'type': TYPE_MAPPING[row[1].lower()]
-            }
+            schema_name = base_schema_name
+            key_parts = row[0].split(".")
+            field_type = TYPE_MAPPING[row[1].lower()]
+            
+            length = len(key_parts)
+            for i, part in enumerate(key_parts):
+                field_name = get_field_name(part)
+                if i == length - 1:
+                    field_schema = get_field_schema(part, field_type, True)
+                else:
+                    field_schema = get_field_schema(part, field_type, False, schema_name + field_name.capitalize())
 
-        self.openapi_data['components']['schemas'][schema_name] = {
-            'title': schema_name,
-            'type': 'object',
-            'required': required,
-            'properties': properties
-        }
-    
+
+                if schema_name in schemas:
+                    schemas[schema_name]["properties"][field_name] = field_schema
+                else:
+                    schemas[schema_name] = {
+                        "type": "object",
+                        "required": [],
+                        "properties": {
+                            field_name: field_schema
+                        }
+                    }
+                
+                required = schemas[schema_name]['required']
+                if '?' not in part and field_name not in required:
+                    required.append(field_name)
+
+                schema_name += field_name.capitalize()
+
     def get_responses(self, soup: BeautifulSoup, base_schema_name: str):
         response_data = {}
         response_tag = soup.find('h3', string='Responses')
         if response_tag is None:
             return None
 
-        for h4 in response_tag.find_next_siblings('h4'):
-            status_code = h4.get_text()
+        for p in response_tag.find_next_siblings('p'):
+            status_code = p.get_text()
             if status_code[0] == '2':
                 description = f'Success {status_code}'
-                schema_name = f'{base_schema_name}Success{status_code}'
             else:
                 description = f'Error {status_code}'
-                schema_name = f'{base_schema_name}Error{status_code}'
 
+            schema_name = f'{base_schema_name}Response{status_code}'
             response_data[status_code] = {
                 'description': description,
                 'content': {
@@ -125,12 +187,12 @@ class OpenAPIConvert:
                 }
             }
 
-            self.set_schema(schema_name, h4.find_next_sibling('table'))
+            self.set_schema(schema_name, p.find_next_sibling('table'))
 
         return response_data
 
     def get_request_body(self, soup: BeautifulSoup, base_schema_name: str):
-        schema_name = f'{base_schema_name}Input'
+        schema_name = f'{base_schema_name}RequestBody'
         request_body = {
             'content': {
                 'application/json': {
@@ -157,7 +219,8 @@ class OpenAPIConvert:
         path_data = {
             'description': soup.find('h2').get_text().replace('description: ', '')
         }
-        base_schema_name = f"{method}{url.replace('/', ' ')}".title().replace(' ', '')
+        base_schema_name = f"{method}{url.replace('/', ' ').replace('{', ' ').replace('}', '').replace('_', '')}"
+        base_schema_name = base_schema_name.title().replace(' ', '')
 
         parameters = self.get_parameters(soup)
         if parameters:
@@ -171,21 +234,19 @@ class OpenAPIConvert:
         if request_body:
             path_data['requestBody'] = request_body
 
-        if url in self.openapi_data['paths']:
-            self.openapi_data['paths'][url][method] = path_data
+        if url in self.openapi_schema['paths']:
+            self.openapi_schema['paths'][url][method] = path_data
         else:
-            self.openapi_data['paths'][url] = {
-                method: path_data
-            }
+            self.openapi_schema['paths'][url] = {method: path_data}
 
     def convert(self):
-        for soup in self.soups:
+        for soup in self.soups[:1]:
             try:
                 self.set_path_data(soup)
             except Exception as e:
-                print(e)
+                traceback.print_exc()
 
-        write_yaml_file(self.openapi_data)
+        write_yaml_file(self.openapi_schema)
 
     @classmethod
     def read_markdown(cls):
