@@ -35,7 +35,7 @@ class OpenAPIConvert:
     def __init__(self):
         self.soups: List[BeautifulSoup] = []
         self.openapi_schema = {
-            'openapi': '3.1.0',
+            'openapi': '3.0.0',
             'info': {
                 'title': 'Tockto API',
                 'version': '0.1.0'
@@ -45,6 +45,9 @@ class OpenAPIConvert:
                 'schemas': {}
             }
         }
+
+    def get_field_name(self, field_name: str):
+        return field_name.replace('[]', '').replace('?', '')
     
     def get_parameters(self, soup: BeautifulSoup):
         def get_data(parameter: tuple, soup: BeautifulSoup):
@@ -58,12 +61,14 @@ class OpenAPIConvert:
             tbody = table.find('tbody')
             for tr in tbody.find_all('tr'):
                 row = [td.text for td in tr.find_all('td')]
+
+                field_name = self.get_field_name(row[0])
                 parameter_data.append({
-                    'required': False,
+                    'required': False if '?' in row[0] else True,
                     'schema': {
                         'type': TYPE_MAPPING[row[1].lower()],
                     },
-                    'name': row[0],
+                    'name': field_name,
                     'in': parameter[1],
                     'description': row[1],
                 })
@@ -90,9 +95,6 @@ class OpenAPIConvert:
         }
 
         schemas = self.openapi_schema['components']['schemas']
-
-        def get_field_name(field_name: str):
-            return field_name.replace('[]', '').replace('?', '')
     
         def get_field_schema(
             part: str,
@@ -112,7 +114,7 @@ class OpenAPIConvert:
                     schema = {
                         'type': 'array',
                         'items': {
-                            '$ref': f"#/compononents/schemas/{schema_name}"
+                            '$ref': f"#/components/schemas/{schema_name}"
                         }
                     }
             else:
@@ -122,7 +124,7 @@ class OpenAPIConvert:
                     }
                 else:
                     schema = {
-                        '$ref': f"#/compononents/schemas/{schema_name}"
+                        '$ref': f"#/components/schemas/{schema_name}"
                     }
             
             return schema
@@ -138,7 +140,7 @@ class OpenAPIConvert:
             
             length = len(key_parts)
             for i, part in enumerate(key_parts):
-                field_name = get_field_name(part)
+                field_name = self.get_field_name(part)
                 if i == length - 1:
                     field_schema = get_field_schema(part, field_type, True)
                 else:
@@ -168,26 +170,39 @@ class OpenAPIConvert:
         if response_tag is None:
             return None
 
-        for p in response_tag.find_next_siblings('p'):
-            status_code = p.get_text()
+        for h4 in response_tag.find_next_siblings('h4'):
+            status_code = h4.get_text()
             if status_code[0] == '2':
                 description = f'Success {status_code}'
             else:
                 description = f'Error {status_code}'
 
-            schema_name = f'{base_schema_name}Response{status_code}'
-            response_data[status_code] = {
+            schemas = {
                 'description': description,
-                'content': {
-                    'application/json': {
-                        'schema': {
-                            '$ref': f'#/components/schemas/{schema_name}'
+            }
+            for p in h4.find_next_siblings('p'):
+                if p.get_text().lower() == 'content':
+                    schema_name = f'{base_schema_name}Response{status_code}Content'
+                    schemas['content'] = {
+                        'application/json': {
+                            'schema': {
+                                '$ref': f'#/components/schemas/{schema_name}'
+                            }
                         }
                     }
-                }
-            }
+                # else:
+                #     schema_name = f'{base_schema_name}Response{status_code}Headers'
+                #     schemas['headers'] = {
+                #         'application/json': {
+                #             'schema': {
+                #                 '$ref': f'#/components/schemas/{schema_name}'
+                #             }
+                #         }
+                #     }
 
-            self.set_schema(schema_name, p.find_next_sibling('table'))
+                self.set_schema(schema_name, h4.find_next_sibling('table'))
+
+            response_data[status_code] = schemas
 
         return response_data
 
@@ -219,7 +234,7 @@ class OpenAPIConvert:
         path_data = {
             'description': soup.find('h2').get_text().replace('description: ', '')
         }
-        base_schema_name = f"{method}{url.replace('/', ' ').replace('{', ' ').replace('}', '').replace('_', '')}"
+        base_schema_name = f"{method}{url.replace('/', ' ').replace('{', ' ').replace('}', '').replace('_', ' ')}"
         base_schema_name = base_schema_name.title().replace(' ', '')
 
         parameters = self.get_parameters(soup)
@@ -240,7 +255,7 @@ class OpenAPIConvert:
             self.openapi_schema['paths'][url] = {method: path_data}
 
     def convert(self):
-        for soup in self.soups[:1]:
+        for soup in self.soups:
             try:
                 self.set_path_data(soup)
             except Exception as e:
